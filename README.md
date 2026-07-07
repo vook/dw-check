@@ -1,63 +1,65 @@
 # dw-check
 
-CLI para validar scripts DataWeave 2.x via API pública do [MuleSoft DataWeave Playground](https://dataweave.mulesoft.com/learn/dataweave).
+> 🇧🇷 [Leia em português](README.pt.md)
 
-Zero dependências. Roda em Node.js >= 14.
+CLI to validate DataWeave 2.x scripts via the [MuleSoft DataWeave Playground](https://dataweave.mulesoft.com/learn/dataweave) public API.
 
-## Instalação
+Zero dependencies. Runs on Node.js >= 14.
+
+## Installation
 
 ```bash
-npm install -g dw-check
-# ou use via npx:
-npx dw-check script.dwl
+npm install -g @mrvook/dw-check
+# or use via npx:
+npx @mrvook/dw-check script.dwl
 ```
 
-## Uso
+## Usage
 
 ```bash
-# Validar arquivo de script
-dw-check meu-script.dwl
+# Validate a script file
+dw-check my-script.dwl
 
-# Validar script inline
+# Validate inline script
 dw-check --inline "%dw 2.0\noutput json\n---\n{message: \"hello\"}"
 
-# Com inputs (payload, vars, etc.)
-dw-check script.dwl --input payload=entrada.json
-dw-check script.dwl --input payload=dados.json --input vars=contexto.json
+# With inputs (payload, vars, etc.)
+dw-check script.dwl --input payload=input.json
+dw-check script.dwl --input payload=data.json --input vars=context.json
 
-# Checagem de sintaxe apenas
+# Syntax check only
 dw-check script.dwl --syntax-only
 
-# Mostrar output em caso de sucesso
-dw-check script.dwl --input payload=entrada.json --output
+# Show output on success
+dw-check script.dwl --input payload=input.json --output
 
-# Saída JSON (para CI/CD)
+# JSON output (for CI/CD)
 dw-check script.dwl --json
 
-# Saída otimizada para agentes AI (com contexto, snippets, sugestões)
+# AI-agent-optimized output (with context, snippets, suggestions)
 dw-check script.dwl --agent
 
-# Silencioso — só retorna exit code (0=ok, 1=erro, 2=falha)
+# Silent — only returns exit code (0=ok, 1=error, 2=failure)
 dw-check script.dwl --silent
 
 # Via stdin
-cat script.dwl | dw-check --input payload=entrada.json
+cat script.dwl | dw-check --input payload=input.json
 ```
 
 ## Exit codes
 
-| Code | Significado |
-|------|-------------|
-| 0    | Script válido |
-| 1    | Erro de compilação/validação |
-| 2    | Falha na requisição (rede, timeout) |
-| 3    | Resposta inválida da API |
+| Code | Meaning |
+|------|---------|
+| 0    | Valid script |
+| 1    | Compilation/validation error |
+| 2    | Request failure (network, timeout) |
+| 3    | Invalid API response |
 
-## Formato dos erros
+## Error format
 
-Erros incluem: tipo (`CompilationException`, etc.), mensagem, e localização exata (linha, coluna, snippet).
+Errors include: type (`CompilationException`, etc.), message, and exact location (line, column, snippet).
 
-Exemplo:
+Example:
 ```
 ✘ CompilationException
 Missing Object Field Expression. e.g  {a: 123}
@@ -67,12 +69,12 @@ Missing Object Field Expression. e.g  {a: 123}
 Location:
 main (line: 4, column:10)
 
-  em main line 4:10
+  in main line 4:10
 ```
 
-## Modo agente (`--agent`)
+## Agent mode (`--agent`)
 
-Output JSON otimizado para consumo por agentes AI (Claude, ChatGPT, etc.):
+JSON output optimized for AI agents (Claude, ChatGPT, etc.):
 
 ```json
 {
@@ -88,18 +90,18 @@ Output JSON otimizado para consumo por agentes AI (Claude, ChatGPT, etc.):
       { "line": 3, "text": "---", "error": false },
       { "line": 4, "text": "payload", "error": true }
     ],
-    "suggestion": "adicione --input payload=arquivo.json"
+    "suggestion": "add --input payload=file.json"
   }]
 }
 ```
 
-## Formatos de input suportados
+## Supported input formats
 
-JSON, XML, CSV, texto, YAML, NDJSON. O MIME type é detectado automaticamente pela extensão do arquivo.
+JSON, XML, CSV, text, YAML, NDJSON. MIME type is auto-detected from file extension.
 
 ## Imports
 
-**Módulos padrão (stdlib):** todos funcionam — `dw::core::*`, `dw::util::*`, `dw::Runtime::*`, etc.
+**Standard library modules (stdlib):** all work — `dw::core::*`, `dw::util::*`, `dw::Runtime::*`, etc.
 
 ```bash
 dw-check --inline "%dw 2.0
@@ -109,22 +111,22 @@ output json
 {upper: upper('hello')}" --output
 ```
 
-**Módulos customizados (seus próprios `.dwl`):** não suportados pela API `/transform`. O endpoint aceita apenas script principal + inputs.
+**Custom modules (your own `.dwl` files):** not supported by the `/transform` endpoint. It only accepts a main script + inputs.
 
-**Workaround:** declare funções reutilizáveis direto no script (sem `import`).
+**Workaround:** declare reusable functions directly in the script (no `import`).
 
-## `$` em strings
+## `$` in strings
 
-`$` dentro de strings DataWeave dispara interpolação: `$var` (shorthand) ou `$(expr)`. Para `$` literal, escape com `\$`.
+`$` inside DataWeave strings triggers interpolation: `$var` (shorthand) or `$(expr)`. For a literal `$`, escape with `\$`.
 
-| Script | Resultado |
-|--------|-----------|
-| `"$(name)"` | Interpola a variável `name` |
-| `"$100"` | Erro — `$` tenta interpolar |
+| Script | Result |
+|--------|--------|
+| `"$(name)"` | Interpolates the `name` variable |
+| `"$100"` | Error — `$` attempts interpolation |
 | `"\$100"` | `$100` (literal) |
 
-Comportamento correto do DataWeave 2.x. Scripts com `$` em CDATA no Mule XML funcionam porque o parser de expressão do Mule processa o `$` antes do DataWeave.
+This is correct DataWeave 2.x behavior. Scripts with `$` inside CDATA in Mule XML work because the Mule expression parser processes the `$` before DataWeave sees it.
 
 ## Disclaimer
 
-Esta ferramenta é um wrapper não-oficial da API pública do [DataWeave Playground](https://dataweave.mulesoft.com/learn/dataweave). Não é mantida pela MuleSoft/Salesforce.
+This tool is an unofficial wrapper around the [DataWeave Playground](https://dataweave.mulesoft.com/learn/dataweave) public API. It is not maintained by MuleSoft/Salesforce.
