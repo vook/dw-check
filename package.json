@@ -1,6 +1,6 @@
 {
   "name": "@mrvook/dw-check",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "CLI para validar scripts DataWeave 2.x — syntax, erros, e execução via API pública do MuleSoft Playground",
   "main": "dw-check.js",
   "bin": {
