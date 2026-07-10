@@ -264,6 +264,34 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
   return { script: modifiedLines.join("\n"), lineMap: lineMap };
 }
 
+// ─── Error location adjustment ──────────────────────────────────────────────
+
+/**
+ * Ajusta os números de linha em um erro da API do DataWeave Playground
+ * para refletir o script original (antes da injeção de imports).
+ *
+ * Usa o lineMap produzido por resolveImports:
+ *   lineMap[modifiedLineIndex] = originalLineNumber
+ *
+ * O objeto error é modificado in-place.
+ */
+function adjustErrorLocation(error, lineMap) {
+  if (!error || !error.location || !error.location.start) return error;
+
+  var modifiedLine = error.location.start.line;
+  var originalLine = lineMap[modifiedLine - 1]; // 0-indexed lookup
+
+  if (originalLine != null) {
+    error.location.start.line = originalLine;
+    if (error.location.end && error.location.end.line) {
+      var endModified = error.location.end.line;
+      error.location.end.line = lineMap[endModified - 1] || originalLine;
+    }
+  }
+
+  return error;
+}
+
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
 
 function postJSON(urlString, body, headers = {}) {
