@@ -166,6 +166,104 @@ function extractFunctions(dwlContent, functionNames, wildcard, fileLabel) {
   return functions;
 }
 
+// ─── Import resolution orchestrator ──────────────────────────────────────────
+
+/**
+ * Resolve todos os imports em um script DataWeave recursivamente.
+ *
+ * Para cada linha de import encontrada:
+ * 1. Localiza o arquivo .dwl nos diretórios de resources
+ * 2. Detecta imports circulares (via visited set)
+ * 3. Resolve recursivamente imports dentro do arquivo importado
+ * 4. Extrai as funções solicitadas do arquivo resolvido
+ * 5. Substitui a linha de import pelo código fonte das funções
+ * 6. Constrói lineMap para ajuste de números de linha em erros
+ *
+ * Retorna { script, lineMap } onde:
+ *   - script: conteúdo modificado (pronto para enviar à API)
+ *   - lineMap: array onde lineMap[modifiedLineIdx] = originalLineNumber
+ *     (linhas injetadas apontam para o número da linha do import original)
+ */
+function resolveImports(scriptContent, resourcesDirs, visited) {
+  if (!visited) visited = new Set();
+
+  var lines = scriptContent.split("\n");
+  var importMap = new Map(); // lineIndex → { functionCode }
+
+  // Primeira passagem: identifica e resolve todos os imports
+  for (var i = 0; i < lines.length; i++) {
+    var parsed = parseImportLine(lines[i]);
+    if (!parsed) continue;
+
+    // Resolve o arquivo do módulo
+    var moduleFile = resolveModuleFile(parsed.module, resourcesDirs);
+    if (!moduleFile) {
+      die("módulo '" + parsed.module + "' não encontrado nos paths de resources: " + resourcesDirs.join(", "));
+    }
+
+    // Detecta import circular
+    if (visited.has(moduleFile)) {
+      var chain = [];
+      visited.forEach(function (v) { chain.push(v); });
+      chain.push(moduleFile);
+      die("import circular detectado: " + chain.join(" → "));
+    }
+
+    // Lê o arquivo
+    var dwlContent;
+    try {
+      dwlContent = fs.readFileSync(moduleFile, "utf-8");
+    } catch (err) {
+      die("não foi possível ler o módulo '" + moduleFile + "': " + err.message);
+    }
+
+    // Resolve recursivamente os imports do arquivo dependente
+    var visitedCopy = new Set(visited);
+    visitedCopy.add(moduleFile);
+    var resolved = resolveImports(dwlContent, resourcesDirs, visitedCopy);
+
+    // Extrai as funções solicitadas
+    var functions = extractFunctions(
+      resolved.script,
+      parsed.wildcard ? [] : parsed.functions,
+      parsed.wildcard,
+      moduleFile
+    );
+
+    // Concatena o código das funções extraídas
+    var funCodeParts = [];
+    functions.forEach(function (code) {
+      funCodeParts.push(code);
+    });
+
+    importMap.set(i, funCodeParts.join("\n"));
+  }
+
+  // Segunda passagem: constrói o script modificado e o lineMap
+  var modifiedLines = [];
+  var lineMap = []; // 0-indexed: modifiedLineIndex → originalLineNumber (1-indexed)
+
+  for (var i = 0; i < lines.length; i++) {
+    var replacement = importMap.get(i);
+
+    if (replacement !== undefined) {
+      var importLineNumber = i + 1; // 1-indexed
+      var codeLines = replacement.split("\n");
+
+      // Adiciona linhas de código injetado
+      for (var c = 0; c < codeLines.length; c++) {
+        modifiedLines.push(codeLines[c]);
+        lineMap.push(importLineNumber); // injetado → aponta para linha do import
+      }
+    } else {
+      modifiedLines.push(lines[i]);
+      lineMap.push(i + 1); // não-injetado → mapeia para si mesmo
+    }
+  }
+
+  return { script: modifiedLines.join("\n"), lineMap: lineMap };
+}
+
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
 
 function postJSON(urlString, body, headers = {}) {
