@@ -190,6 +190,15 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
   var lines = scriptContent.split("\n");
   var importMap = new Map(); // lineIndex → { functionCode }
 
+  // Coleta imports dw:: do script atual para evitar duplicação na re-emissão
+  var mainDwImports = [];
+  for (var mi = 0; mi < lines.length; mi++) {
+    var ml = lines[mi].trim();
+    if (/^import\s+.*\s+from\s+dw::/.test(ml)) {
+      mainDwImports.push(ml);
+    }
+  }
+
   // Primeira passagem: identifica e resolve todos os imports
   for (var i = 0; i < lines.length; i++) {
     var parsed = parseImportLine(lines[i]);
@@ -227,6 +236,18 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
     visitedCopy.add(moduleFile);
     var resolved = resolveImports(dwlContent, resourcesDirs, visitedCopy);
 
+    // Coleta imports dw:: do módulo resolvido para re-emitir
+    var dwImports = [];
+    var resolvedLines = resolved.script.split("\n");
+    for (var ri = 0; ri < resolvedLines.length; ri++) {
+      var rl = resolvedLines[ri].trim();
+      if (/^import\s+.*\s+from\s+dw::/.test(rl)) {
+        if (dwImports.indexOf(rl) === -1 && mainDwImports.indexOf(rl) === -1) {
+          dwImports.push(rl);
+        }
+      }
+    }
+
     // Extrai TODAS as funções do módulo resolvido (não só as solicitadas),
     // pois dependências transitivas já foram inlineadas em resolved.script.
     // Ex: se A importa f de B e B importa g de C, o script resolvido de B
@@ -247,8 +268,11 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
       }
     }
 
-    // Concatena o código das funções extraídas
+    // Concatena o código das funções extraídas (com imports dw:: preservados)
     var funCodeParts = [];
+    for (var di = 0; di < dwImports.length; di++) {
+      funCodeParts.push(dwImports[di]);
+    }
     functions.forEach(function (code) {
       funCodeParts.push(code);
     });
@@ -898,16 +922,9 @@ async function main() {
       // Ajusta linhas de erro para script original (após context extraction)
       if (lineMap && agentOutput.errors) {
         for (var ei = 0; ei < agentOutput.errors.length; ei++) {
-          var errEntry = agentOutput.errors[ei];
-          if (errEntry.location && errEntry.location.start) {
-            var adjLine = lineMap[errEntry.location.start.line - 1];
-            if (adjLine != null) {
-              errEntry.location.start.line = adjLine;
-              if (errEntry.location.end && errEntry.location.end.line) {
-                errEntry.location.end.line = lineMap[errEntry.location.end.line - 1] || adjLine;
-              }
-            }
-          }
+          var errWrapper = { location: agentOutput.errors[ei].location };
+          adjustErrorLocation(errWrapper, lineMap);
+          agentOutput.errors[ei].location = errWrapper.location;
         }
       }
       console.log(JSON.stringify(agentOutput, null, 2));
