@@ -42,6 +42,10 @@ dw-check script.dwl --agent
 # Silencioso — só retorna exit code (0=ok, 1=erro, 2=falha)
 dw-check script.dwl --silent
 
+# Resolver imports de módulos customizados
+dw-check script.dwl --resources src/main/resources
+dw-check script.dwl -r src/main/resources -r src/test/resources
+
 # Via stdin
 cat script.dwl | dw-check --input payload=entrada.json
 ```
@@ -111,9 +115,50 @@ output json
 {upper: upper('hello')}" --output
 ```
 
-**Módulos customizados (seus próprios `.dwl`):** não suportados pela API `/transform`. O endpoint aceita apenas script principal + inputs.
+**Módulos customizados (seus próprios `.dwl`):** resolvidos localmente via flag `--resources`. O CLI inlineia as funções importadas antes de enviar o script para a API.
 
-**Workaround:** declare funções reutilizáveis direto no script (sem `import`).
+Dada a estrutura de projeto:
+```
+src/main/resources/
+  modules/
+    utils.dwl
+  meu-script.dwl
+```
+
+Com `meu-script.dwl`:
+```dataweave
+%dw 2.0
+output json
+import formatName, validateEmail from modules::utils
+---
+formatName(payload.name)
+```
+
+E `modules/utils.dwl`:
+```dataweave
+%dw 2.0
+import * from dw::core::Strings
+
+fun formatName(name) = trim(upper(name))
+fun validateEmail(email) = email contains "@"
+```
+
+Execute:
+```bash
+dw-check meu-script.dwl --resources src/main/resources
+```
+
+**Formatos de import suportados:**
+- Import nomeado: `import foo, bar from modules::utils`
+- Import wildcard: `import * from modules::utils`
+- Imports aninhados: módulos que importam outros módulos são resolvidos recursivamente
+- Imports circulares: detectados e reportados como erro fatal
+
+Paths de módulo usam `::` como separador (convenção DataWeave), mapeados para paths do sistema de arquivos: `modules::utils` → `modules/utils.dwl`.
+
+A flag `--resources` pode ser usada múltiplas vezes. O primeiro diretório que contiver o arquivo `.dwl` solicitado vence.
+
+**Mapeamento de linhas:** quando a API reporta um erro, os números de linha são ajustados de volta para o script original (antes da injeção dos imports), para que a localização do erro corresponda aos seus arquivos fonte.
 
 ## `$` em strings
 

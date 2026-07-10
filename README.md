@@ -42,6 +42,10 @@ dw-check script.dwl --agent
 # Silent — only returns exit code (0=ok, 1=error, 2=failure)
 dw-check script.dwl --silent
 
+# Resolve custom module imports
+dw-check script.dwl --resources src/main/resources
+dw-check script.dwl -r src/main/resources -r src/test/resources
+
 # Via stdin
 cat script.dwl | dw-check --input payload=input.json
 ```
@@ -111,9 +115,50 @@ output json
 {upper: upper('hello')}" --output
 ```
 
-**Custom modules (your own `.dwl` files):** not supported by the `/transform` endpoint. It only accepts a main script + inputs.
+**Custom modules (your own `.dwl` files):** resolved locally via the `--resources` flag. The CLI inlines imported functions before sending the script to the API.
 
-**Workaround:** declare reusable functions directly in the script (no `import`).
+Given a project structure:
+```
+src/main/resources/
+  modules/
+    utils.dwl
+  my-script.dwl
+```
+
+With `my-script.dwl`:
+```dataweave
+%dw 2.0
+output json
+import formatName, validateEmail from modules::utils
+---
+formatName(payload.name)
+```
+
+And `modules/utils.dwl`:
+```dataweave
+%dw 2.0
+import * from dw::core::Strings
+
+fun formatName(name) = trim(upper(name))
+fun validateEmail(email) = email contains "@"
+```
+
+Run:
+```bash
+dw-check my-script.dwl --resources src/main/resources
+```
+
+**Supported import formats:**
+- Named imports: `import foo, bar from modules::utils`
+- Wildcard imports: `import * from modules::utils`
+- Nested imports: modules that import other modules are resolved recursively
+- Circular imports: detected and reported as fatal errors
+
+Module paths use `::` as separator (DataWeave convention), mapped to filesystem paths: `modules::utils` → `modules/utils.dwl`.
+
+The `--resources` flag can be used multiple times. The first directory containing the requested `.dwl` file wins.
+
+**Line mapping:** when the API reports an error, line numbers are adjusted back to the original script (before import inlining), so error locations match your source files.
 
 ## `$` in strings
 
