@@ -74,6 +74,27 @@ function parseImportLine(line) {
   return { functions: functions, module: modulePath, wildcard: wildcard };
 }
 
+// ─── Module resolution ────────────────────────────────────────────────────
+
+/**
+ * Converte um path de módulo DataWeave (mod::sub::name) para caminho de
+ * arquivo .dwl e busca nos diretórios de resources fornecidos.
+ *
+ * Retorna o path absoluto do primeiro arquivo encontrado, ou null.
+ */
+function resolveModuleFile(modulePath, resourcesDirs) {
+  // Converte modules::utils::helpers → modules/utils/helpers.dwl
+  var filePath = modulePath.replace(/::/g, "/") + ".dwl";
+
+  for (var i = 0; i < resourcesDirs.length; i++) {
+    var fullPath = path.resolve(resourcesDirs[i], filePath);
+    if (fs.existsSync(fullPath)) {
+      return fullPath;
+    }
+  }
+  return null;
+}
+
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
 
 function postJSON(urlString, body, headers = {}) {
