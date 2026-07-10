@@ -353,6 +353,7 @@ function parseArgs(argv) {
     showOutput: false,
     silent: false,
     agentMode: false,
+    resources: [],
   };
 
   let i = 0;
@@ -424,6 +425,15 @@ function parseArgs(argv) {
       continue;
     }
 
+    if (arg === "--resources" || arg === "-r") {
+      var resPath = args[++i];
+      if (!resPath) die("Falta o path após --resources");
+      result.resources.push(resPath);
+      dim("resources ← " + resPath);
+      i++;
+      continue;
+    }
+
     // Assume que é o arquivo de script
     if (!result.script && !arg.startsWith("-")) {
       result.script = arg;
@@ -455,6 +465,9 @@ function printHelp() {
   --silent, -q                  Sem output no stdout em caso de sucesso (só status code)
   --agent                       Saída otimizada para agentes AI (JSON com contexto,
                                 código ao redor do erro, e sugestões de correção)
+  --resources, -r <path>        Adiciona um diretório de resources para resolução de imports
+                                 Pode ser usado múltiplas vezes.
+                                 Ex: --resources ./src/resources
   --help, -h                    Mostra esta ajuda
 
 \x1b[1mExemplos:\x1b[0m
@@ -743,6 +756,38 @@ async function main() {
     die("Script vazio.");
   }
 
+  // Detecta imports sem --resources
+  if (!opts.resources || opts.resources.length === 0) {
+    var firstImport = null;
+    var lines = scriptContent.split("\n");
+    for (var li = 0; li < lines.length; li++) {
+      firstImport = parseImportLine(lines[li]);
+      if (firstImport) break;
+    }
+    if (firstImport) {
+      die(
+        "script contém import (" + firstImport.module + ") mas --resources não foi informado.\n" +
+        "  Use: dw-check script.dwl --resources caminho/para/resources"
+      );
+    }
+  }
+
+  // ─── Resolução de imports ────────────────────────────────────────────────
+  var lineMap = null;
+  if (opts.resources && opts.resources.length > 0) {
+    var hasImports = scriptContent.split("\n").some(function (l) {
+      return parseImportLine(l) !== null;
+    });
+    if (hasImports) {
+      if (!opts.jsonOutput && !opts.silent && !opts.agentMode) {
+        dim("resolvendo imports...");
+      }
+      var resolved = resolveImports(scriptContent, opts.resources);
+      scriptContent = resolved.script;
+      lineMap = resolved.lineMap;
+    }
+  }
+
   // Validação syntax-only: usa a API também, mas podemos adicionar header
   const actionHeader = opts.syntaxOnly
     ? { "X-DataweaveAction": "weaveType" }
@@ -832,13 +877,28 @@ async function main() {
   } else {
     // Erro
     if (opts.agentMode) {
-      console.log(JSON.stringify(
-        formatAgentOutput(result, scriptContent, scriptLabel, opts),
-        null, 2
-      ));
+      var agentOutput = formatAgentOutput(result, scriptContent, scriptLabel, opts);
+      // Ajusta linhas de erro para script original (após context extraction)
+      if (lineMap && agentOutput.errors) {
+        for (var ei = 0; ei < agentOutput.errors.length; ei++) {
+          var errEntry = agentOutput.errors[ei];
+          if (errEntry.location && errEntry.location.start) {
+            var adjLine = lineMap[errEntry.location.start.line - 1];
+            if (adjLine != null) {
+              errEntry.location.start.line = adjLine;
+              if (errEntry.location.end && errEntry.location.end.line) {
+                errEntry.location.end.line = lineMap[errEntry.location.end.line - 1] || adjLine;
+              }
+            }
+          }
+        }
+      }
+      console.log(JSON.stringify(agentOutput, null, 2));
     } else if (opts.jsonOutput) {
+      if (lineMap) adjustErrorLocation(result.error, lineMap);
       console.log(JSON.stringify(formatErrorJSON(result.error), null, 2));
     } else {
+      if (lineMap) adjustErrorLocation(result.error, lineMap);
       console.log("");
       console.log(formatError(result.error, scriptContent.split("\n")));
       console.log("");
