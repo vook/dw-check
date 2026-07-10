@@ -1,20 +1,20 @@
 #!/usr/bin/env node
 
 /**
- * dw-check — Valida scripts DataWeave 2.x pela API pública do MuleSoft Playground.
+ * dw-check — Validate DataWeave 2.x scripts via the MuleSoft Playground public API.
  *
- * Uso:
- *   node dw-check.js <script.dwl> [--input nome=arquivo.json ...]
- *   node dw-check.js --inline "%dw 2.0 ..." [--input nome=arquivo.json ...]
+ * Usage:
+ *   node dw-check.js <script.dwl> [--input name=file.json ...]
+ *   node dw-check.js --inline "%dw 2.0 ..." [--input name=file.json ...]
  *   node dw-check.js <script.dwl> --syntax-only
  *   node dw-check.js <script.dwl> --json
  *
- * Exemplos:
- *   node dw-check.js meu-script.dwl
- *   node dw-check.js meu-script.dwl --input payload=entrada.json
- *   node dw-check.js meu-script.dwl --input payload=entrada.json --input vars=variaveis.json
+ * Examples:
+ *   node dw-check.js my-script.dwl
+ *   node dw-check.js my-script.dwl --input payload=data.json
+ *   node dw-check.js my-script.dwl --input payload=data.json --input vars=vars.json
  *   node dw-check.js --inline "%dw 2.0\noutput json\n---\n{ a: 1 }"
- *   node dw-check.js meu-script.dwl --json > resultado.json
+ *   node dw-check.js my-script.dwl --json > result.json
  */
 
 "use strict";
@@ -34,12 +34,12 @@ const MAIN_FILE = "main.dwl";
 // ─── Utilidades ───────────────────────────────────────────────────────────────
 
 function die(msg, code = 1) {
-  console.error(`\x1b[31merro:\x1b[0m ${msg}`);
+  console.error(`\x1b[31merror:\x1b[0m ${msg}`);
   process.exit(code);
 }
 
 function warn(msg) {
-  console.error(`\x1b[33maviso:\x1b[0m ${msg}`);
+  console.error(`\x1b[33mwarning:\x1b[0m ${msg}`);
 }
 
 function dim(msg) {
@@ -125,7 +125,7 @@ function extractFunctions(dwlContent, functionNames, wildcard, fileLabel) {
 
   if (funStarts.length === 0) {
     if (wildcard) return new Map();
-    die("nenhuma função encontrada em " + fileLabel);
+    die("no functions found in " + fileLabel);
   }
 
   var functions = new Map();
@@ -158,7 +158,7 @@ function extractFunctions(dwlContent, functionNames, wildcard, fileLabel) {
     for (var k = 0; k < functionNames.length; k++) {
       var name = functionNames[k];
       if (!functions.has(name)) {
-        die("função '" + name + "' não encontrada em " + fileLabel);
+        die("function '" + name + "' not found in " + fileLabel);
       }
     }
   }
@@ -212,7 +212,7 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
     // Resolve o arquivo do módulo
     var moduleFile = resolveModuleFile(parsed.module, resourcesDirs);
     if (!moduleFile) {
-      die("módulo '" + parsed.module + "' não encontrado nos paths de resources: " + resourcesDirs.join(", "));
+      die("module '" + parsed.module + "' not found in resources paths: " + resourcesDirs.join(", "));
     }
 
     // Detecta import circular
@@ -220,7 +220,7 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
       var chain = [];
       visited.forEach(function (v) { chain.push(v); });
       chain.push(moduleFile);
-      die("import circular detectado: " + chain.join(" → "));
+      die("circular import detected: " + chain.join(" → "));
     }
 
     // Lê o arquivo
@@ -228,7 +228,7 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
     try {
       dwlContent = fs.readFileSync(moduleFile, "utf-8");
     } catch (err) {
-      die("não foi possível ler o módulo '" + moduleFile + "': " + err.message);
+      die("could not read module '" + moduleFile + "': " + err.message);
     }
 
     // Resolve recursivamente os imports do arquivo dependente
@@ -263,7 +263,7 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
     if (!parsed.wildcard) {
       for (var k = 0; k < parsed.functions.length; k++) {
         if (!functions.has(parsed.functions[k])) {
-          die("função '" + parsed.functions[k] + "' não encontrada em " + moduleFile);
+          die("function '" + parsed.functions[k] + "' not found in " + moduleFile);
         }
       }
     }
@@ -372,7 +372,7 @@ function postJSON(urlString, body, headers = {}) {
     req.on("error", reject);
     req.setTimeout(30_000, () => {
       req.destroy();
-      reject(new Error("Timeout após 30s"));
+      reject(new Error("Timeout after 30s"));
     });
 
     req.write(payload);
@@ -408,7 +408,7 @@ function parseArgs(argv) {
 
     if (arg === "--inline" || arg === "-i") {
       result.inline = args[++i];
-      if (!result.inline) die("Falta o script após --inline");
+      if (!result.inline) die("Missing script after --inline");
       // Expande escapes comuns do shell (\\n, \\t, \\r)
       result.inline = result.inline
         .replace(/\\n/g, "\n")
@@ -420,9 +420,9 @@ function parseArgs(argv) {
 
     if (arg === "--input" || arg === "-in") {
       const raw = args[++i];
-      if (!raw) die("Falta o valor após --input. Use: --input nome=arquivo.json");
+      if (!raw) die("Missing value after --input. Use: --input name=file.json");
       const eqIdx = raw.indexOf("=");
-      if (eqIdx === -1) die(`Formato inválido para --input "${raw}". Use: nome=arquivo.json`);
+      if (eqIdx === -1) die(`Invalid format for --input "${raw}". Use: name=file.json`);
       const name = raw.slice(0, eqIdx);
       const filePath = raw.slice(eqIdx + 1);
       try {
@@ -430,7 +430,7 @@ function parseArgs(argv) {
         result.inputPaths[name] = filePath;
         dim(`input "${name}" ← ${filePath}`);
       } catch (err) {
-        die(`Não foi possível ler o arquivo de input "${filePath}": ${err.message}`);
+        die(`Could not read input file "${filePath}": ${err.message}`);
       }
       i++;
       continue;
@@ -468,7 +468,7 @@ function parseArgs(argv) {
 
     if (arg === "--resources" || arg === "-r") {
       var resPath = args[++i];
-      if (!resPath) die("Falta o path após --resources");
+      if (!resPath) die("Missing path after --resources");
       result.resources.push(resPath);
       dim("resources ← " + resPath);
       i++;
@@ -482,7 +482,7 @@ function parseArgs(argv) {
       continue;
     }
 
-    die(`Argumento desconhecido: ${arg}`);
+    die(`Unknown argument: ${arg}`);
   }
 
   return result;
@@ -490,33 +490,34 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`
-\x1b[1mdw-check\x1b[0m — Valida scripts DataWeave 2.x
+\x1b[1mdw-check\x1b[0m — Validate DataWeave 2.x scripts
 
-\x1b[1mUso:\x1b[0m
-  dw-check <script.dwl> [opções]
-  dw-check --inline "<script>" [opções]
+\x1b[1mUsage:\x1b[0m
+  dw-check <script.dwl> [options]
+  dw-check --inline "<script>" [options]
 
-\x1b[1mOpções:\x1b[0m
-  --input, -in <nome=arquivo>   Adiciona um input (payload, vars, etc.)
-                                 Pode ser usado múltiplas vezes.
-                                 Ex: --input payload=dados.json
-  --syntax-only, -s             Apenas checagem de sintaxe (sem validação de tipos)
-  --output, -o                  Mostra o output da transformação em caso de sucesso
-  --json, -j                    Saída em formato JSON (ideal para CI/CD)
-  --silent, -q                  Sem output no stdout em caso de sucesso (só status code)
-  --agent                       Saída otimizada para agentes AI (JSON com contexto,
-                                código ao redor do erro, e sugestões de correção)
-  --resources, -r <path>        Adiciona um diretório de resources para resolução de imports
-                                 Pode ser usado múltiplas vezes.
-                                 Ex: --resources ./src/resources
-  --help, -h                    Mostra esta ajuda
+\x1b[1mOptions:\x1b[0m
+  --input, -in <name=file>      Add an input (payload, vars, etc.)
+                                 Can be used multiple times.
+                                 Ex: --input payload=data.json
+  --syntax-only, -s             Syntax check only (no type validation)
+  --output, -o                  Show transformation output on success
+  --json, -j                    JSON output (ideal for CI/CD)
+  --silent, -q                  No stdout on success (status code only)
+  --agent                       AI agent-optimized output (JSON with context,
+                                error code snippets, and fix suggestions)
+  --resources, -r <path>        Add a resources directory for import resolution
+                                 Can be used multiple times (first-match wins).
+                                 Ex: --resources src/main/resources
+  --help, -h                    Show this help
 
-\x1b[1mExemplos:\x1b[0m
+\x1b[1mExamples:\x1b[0m
   dw-check script.dwl
-  dw-check script.dwl --input payload=entrada.json
-  dw-check script.dwl --input payload=entrada.json --input vars=ctx.json
+  dw-check script.dwl --input payload=data.json
+  dw-check script.dwl --input payload=data.json --input vars=ctx.json
   dw-check --inline "%dw 2.0\\noutput json\\n---\\npayload" --syntax-only
   dw-check script.dwl --json
+  dw-check script.dwl --resources src/main/resources
 `);
 }
 
@@ -576,7 +577,7 @@ function buildRequestBody(scriptContent, inputs, inputPaths) {
 function formatError(error, scriptLines) {
   const lines = [];
 
-  lines.push(`\x1b[1;31m✘ ${error.kind || "Erro"}\x1b[0m`);
+  lines.push(`\x1b[1;31m✘ ${error.kind || "Error"}\x1b[0m`);
   lines.push(`\x1b[31m${error.message}\x1b[0m`);
 
   if (error.location) {
@@ -601,7 +602,7 @@ function formatError(error, scriptLines) {
     lines.push("");
     const src = loc.sourceIdentifier || "main";
     lines.push(
-      `  \x1b[2mem\x1b[0m ${src} \x1b[2mline\x1b[0m ${loc.start.line}:${loc.start.column}`
+      `  \x1b[2mat\x1b[0m ${src} \x1b[2mline\x1b[0m ${loc.start.line}:${loc.start.column}`
     );
   }
 
@@ -657,31 +658,31 @@ function suggestFix(error, scriptLines) {
     const ref = (error.message.match(/`([^`]+)`/) || [])[1] || "?";
     const suggestions = [];
     if (ref === "payload" || ref === "vars" || ref === "attributes") {
-      suggestions.push(`adicione --input ${ref}=arquivo.json`);
+      suggestions.push(`add --input ${ref}=file.json`);
     }
-    suggestions.push(`verifique se a variável '${ref}' está definida`);
+    suggestions.push(`check if variable '${ref}' is defined`);
     if (!msg.includes("line:")) {
-      // Erro sem localização — pode ser problema de input directive
-      suggestions.push("adicione diretiva 'input' no header do script (ex: input payload application/json)");
+      // Error without location — may be missing input directive
+      suggestions.push("add 'input' directive in script header (e.g.: input payload application/json)");
     }
     return suggestions.join("; ");
   }
 
   if (msg.includes("missing object field expression")) {
-    return "adicione um valor após ':' (ex: { campo: valor })";
+    return "add a value after ':' (e.g.: { field: value })";
   }
 
   if (msg.includes("invalid input")) {
-    return "verifique a sintaxe do header (%dw 2.0, output, input directives)";
+    return "check header syntax (%dw 2.0, output, input directives)";
   }
 
   if (msg.includes("no variable named")) {
     const ref = (error.message.match(/'([^']+)'/) || [])[1] || "?";
-    return `a variável '${ref}' não foi declarada. Adicione --input ${ref}=arquivo.json ou declare a diretiva 'input' no header`;
+    return `variable '${ref}' was not declared. Add --input ${ref}=file.json or declare 'input' directive in header`;
   }
 
   if (msg.includes("invalid") && msg.includes("expected")) {
-    return "verifique a sintaxe — há um token inesperado na posição indicada";
+    return "check syntax — unexpected token at the indicated position";
   }
 
   return null;
@@ -777,12 +778,12 @@ async function main() {
       scriptLabel = opts.script;
       dim(`script ← ${opts.script}`);
     } catch (err) {
-      die(`Não foi possível ler o script "${opts.script}": ${err.message}`);
+      die(`Could not read script "${opts.script}": ${err.message}`);
     }
   } else {
     // Tenta ler do stdin
     if (process.stdin.isTTY) {
-      die("Nenhum script fornecido. Use --help para ver as opções.");
+      die("No script provided. Use --help to see options.");
     }
     const chunks = [];
     for await (const chunk of process.stdin) {
@@ -794,7 +795,7 @@ async function main() {
   }
 
   if (!scriptContent || scriptContent.trim().length === 0) {
-    die("Script vazio.");
+    die("Empty script.");
   }
 
   // Detecta imports sem --resources
@@ -807,8 +808,8 @@ async function main() {
     }
     if (firstImport) {
       die(
-        "script contém import (" + firstImport.module + ") mas --resources não foi informado.\n" +
-        "  Use: dw-check script.dwl --resources caminho/para/resources"
+        "script contains import (" + firstImport.module + ") but --resources was not provided.\n" +
+        "  Use: dw-check script.dwl --resources path/to/resources"
       );
     }
   }
@@ -821,7 +822,7 @@ async function main() {
     });
     if (hasImports) {
       if (!opts.jsonOutput && !opts.silent && !opts.agentMode) {
-        dim("resolvendo imports...");
+        dim("resolving imports...");
       }
       var resolved = resolveImports(scriptContent, opts.resources);
       scriptContent = resolved.script;
@@ -844,9 +845,9 @@ async function main() {
       dim(`inputs: ${inputKeys.join(", ")}`);
     }
     if (opts.syntaxOnly) {
-      dim("modo: syntax-only");
+      dim("mode: syntax-only");
     }
-    dim("enviando para API...");
+    dim("sending to API...");
   }
 
   let response;
@@ -862,7 +863,7 @@ async function main() {
     } else if (opts.jsonOutput) {
       console.log(JSON.stringify({ success: false, error: err.message }, null, 2));
     } else {
-      die(`Falha na requisição: ${err.message}`);
+      die(`Request failed: ${err.message}`);
     }
     process.exit(2);
   }
@@ -872,13 +873,13 @@ async function main() {
     if (opts.agentMode) {
       console.log(JSON.stringify({
         status: "network_error",
-        error: `Resposta inesperada da API (HTTP ${response.status})`,
+        error: `Unexpected API response (HTTP ${response.status})`,
         script: { name: scriptLabel },
       }, null, 2));
     } else if (opts.jsonOutput) {
-      console.log(JSON.stringify({ success: false, error: "Resposta inválida da API" }, null, 2));
+      console.log(JSON.stringify({ success: false, error: "Invalid API response" }, null, 2));
     } else {
-      die(`Resposta inesperada da API (HTTP ${response.status})`);
+      die(`Unexpected API response (HTTP ${response.status})`);
     }
     process.exit(3);
   }
@@ -900,7 +901,7 @@ async function main() {
         logs: result.logs || [],
       }, null, 2));
     } else if (!opts.silent) {
-      console.log(`\x1b[32m✔ Script válido\x1b[0m (${scriptLabel})`);
+      console.log(`\x1b[32m✔ Script valid\x1b[0m (${scriptLabel})`);
       if (opts.showOutput && result.result?.content) {
         console.log("");
         console.log("\x1b[1m── Output ──\x1b[0m");
@@ -942,6 +943,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(`\x1b[31merro fatal:\x1b[0m ${err.message}`);
+  console.error(`\x1b[31mfatal error:\x1b[0m ${err.message}`);
   process.exit(2);
 });
