@@ -46,6 +46,34 @@ function dim(msg) {
   console.error(`\x1b[2m${msg}\x1b[0m`);
 }
 
+// ─── Import parsing ─────────────────────────────────────────────────────────
+
+/**
+ * Parseia uma linha de import DataWeave.
+ * Formatos suportados:
+ *   import func1, func2 from modulo::path
+ *   import * from modulo::path
+ *
+ * Retorna null se a linha não for um import.
+ */
+function parseImportLine(line) {
+  const trimmed = line.trim();
+  // Remove comentários trailing (// ...)
+  const clean = trimmed.replace(/\s*\/\/.*$/, "");
+  const match = clean.match(/^import\s+(\*|[\w\s,]+)\s+from\s+([\w:]+)/);
+  if (!match) return null;
+
+  const rawFunctions = match[1].trim();
+  const modulePath = match[2].trim();
+  const wildcard = rawFunctions === "*";
+
+  const functions = wildcard
+    ? []
+    : rawFunctions.split(/\s*,\s*/).map(function (s) { return s.trim(); }).filter(Boolean);
+
+  return { functions: functions, module: modulePath, wildcard: wildcard };
+}
+
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
 
 function postJSON(urlString, body, headers = {}) {
