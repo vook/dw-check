@@ -95,6 +95,77 @@ function resolveModuleFile(modulePath, resourcesDirs) {
   return null;
 }
 
+// ─── Function extraction ───────────────────────────────────────────────────
+
+/**
+ * Extrai definições de funções de um conteúdo .dwl.
+ *
+ * Cada função vai da linha "fun nome(" até antes do próximo "fun " no
+ * top-level (mesma indentação) ou EOF. O header do arquivo (%dw, output,
+ * diretivas) é ignorado.
+ *
+ * - wildcard: extrai todas as funções encontradas
+ * - functionNames explícito: extrai só as listadas; die() se faltar alguma
+ *
+ * Retorna um Map onde cada chave é o nome da função e o valor é o código
+ * fonte completo da função.
+ */
+function extractFunctions(dwlContent, functionNames, wildcard, fileLabel) {
+  var lines = dwlContent.split("\n");
+  var funRegex = /^(\s*)fun\s+(\w+)\s*\(/;
+  var funStarts = [];
+
+  // Encontra todas as definições de função
+  for (var i = 0; i < lines.length; i++) {
+    var match = lines[i].match(funRegex);
+    if (match) {
+      funStarts.push({ line: i, name: match[2], indent: match[1].length });
+    }
+  }
+
+  if (funStarts.length === 0) {
+    if (wildcard) return new Map();
+    die("nenhuma função encontrada em " + fileLabel);
+  }
+
+  var functions = new Map();
+
+  for (var j = 0; j < funStarts.length; j++) {
+    var start = funStarts[j];
+    var end = (j + 1 < funStarts.length) ? funStarts[j + 1].line : lines.length;
+
+    // Pula funções não solicitadas (modo nomeado)
+    if (!wildcard && functionNames.indexOf(start.name) === -1) continue;
+
+    // Extrai linhas [start.line, end)
+    var funLines = lines.slice(start.line, end);
+
+    // Remove linhas vazias do final
+    while (funLines.length > 0 && funLines[funLines.length - 1].trim() === "") {
+      funLines.pop();
+    }
+
+    // Remove linhas vazias do início da função (entre funções)
+    while (funLines.length > 0 && funLines[0].trim() === "") {
+      funLines.shift();
+    }
+
+    functions.set(start.name, funLines.join("\n"));
+  }
+
+  // Verifica funções faltantes no modo nomeado
+  if (!wildcard) {
+    for (var k = 0; k < functionNames.length; k++) {
+      var name = functionNames[k];
+      if (!functions.has(name)) {
+        die("função '" + name + "' não encontrada em " + fileLabel);
+      }
+    }
+  }
+
+  return functions;
+}
+
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
 
 function postJSON(urlString, body, headers = {}) {
