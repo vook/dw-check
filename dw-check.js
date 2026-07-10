@@ -195,6 +195,11 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
     var parsed = parseImportLine(lines[i]);
     if (!parsed) continue;
 
+    // Skip built-in dw::* modules — they are available in the DataWeave runtime
+    if (/^dw::/.test(parsed.module)) {
+      continue;
+    }
+
     // Resolve o arquivo do módulo
     var moduleFile = resolveModuleFile(parsed.module, resourcesDirs);
     if (!moduleFile) {
@@ -222,13 +227,25 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
     visitedCopy.add(moduleFile);
     var resolved = resolveImports(dwlContent, resourcesDirs, visitedCopy);
 
-    // Extrai as funções solicitadas
+    // Extrai TODAS as funções do módulo resolvido (não só as solicitadas),
+    // pois dependências transitivas já foram inlineadas em resolved.script.
+    // Ex: se A importa f de B e B importa g de C, o script resolvido de B
+    // já contém g inlineado; precisamos extrair ambas.
     var functions = extractFunctions(
       resolved.script,
-      parsed.wildcard ? [] : parsed.functions,
-      parsed.wildcard,
+      [],
+      true,
       moduleFile
     );
+
+    // Valida que as funções explicitamente solicitadas existem
+    if (!parsed.wildcard) {
+      for (var k = 0; k < parsed.functions.length; k++) {
+        if (!functions.has(parsed.functions[k])) {
+          die("função '" + parsed.functions[k] + "' não encontrada em " + moduleFile);
+        }
+      }
+    }
 
     // Concatena o código das funções extraídas
     var funCodeParts = [];
