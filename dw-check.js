@@ -7,6 +7,7 @@
  *   node dw-check.js <script.dwl> [--input name=file.json ...]
  *   node dw-check.js --inline "%dw 2.0 ..." [--input name=file.json ...]
  *   node dw-check.js <script.dwl> --only-syntax
+ *   node dw-check.js --mule-file wallet.xml [--resources path/]
  *   node dw-check.js <script.dwl> --json
  *
  * Examples:
@@ -436,6 +437,7 @@ function parseArgs(argv) {
     showOutput: false,
     silent: false,
     agentMode: false,
+    muleFile: null,
     resources: [],
   };
 
@@ -479,6 +481,15 @@ function parseArgs(argv) {
     }
 
     if (arg === "--only-syntax" || arg === "-s") {
+      result.syntaxOnly = true;
+      i++;
+      continue;
+    }
+
+    if (arg === "--mule-file" || arg === "-m") {
+      result.muleFile = args[++i];
+      if (!result.muleFile) die("Missing path after --mule-file");
+      // mule-file mode implies --only-syntax
       result.syntaxOnly = true;
       i++;
       continue;
@@ -544,6 +555,8 @@ function printHelp() {
                                  Ex: --input payload=data.json
   --only-syntax, -s              Only check syntax (ignore input-related errors
                                  like missing payload/vars)
+  --mule-file, -m <file.xml>    Extract and validate all DW scripts from a
+                                 Mule XML file. Implies --only-syntax.
   --output, -o                  Show transformation output on success
   --json, -j                    JSON output (ideal for CI/CD)
   --silent, -q                  No stdout on success (status code only)
@@ -561,6 +574,7 @@ function printHelp() {
   dw-check --inline "%dw 2.0\\noutput json\\n---\\npayload" --only-syntax
   dw-check script.dwl --json
   dw-check script.dwl --resources src/main/resources
+  dw-check --mule-file wallet.xml --resources src/main/resources
 `);
 }
 
@@ -832,10 +846,263 @@ function formatAgentOutput(result, scriptContent, scriptLabel, opts) {
   return output;
 }
 
+// ─── Mule XML extraction ──────────────────────────────────────────────────
+
+/**
+ * Extrai todos os scripts DataWeave de um arquivo XML do Mule.
+ *
+ * Encontra blocos CDATA contendo "%dw 2.0" e extrai o código completo.
+ * Para cada script, busca contexto (variableName, set-payload, etc.)
+ * no trecho anterior do XML.
+ *
+ * Retorna array de { code, name, xmlLine } onde:
+ *   - code: código DataWeave completo
+ *   - name: nome da variável ou "set-payload" ou "dw-script"
+ *   - xmlLine: número da linha no XML onde o script começa (1-indexed)
+ */
+function extractDataWeaveFromXML(xmlContent) {
+  const cdataRe = /<!\[CDATA\[%dw 2\.0(.*?)\]\]>/gs;
+  const scripts = [];
+  let match;
+
+  while ((match = cdataRe.exec(xmlContent)) !== null) {
+    const dwBody = match[1]; // conteúdo após "%dw 2.0"
+    const index = match.index;
+
+    // Busca contexto no trecho anterior do XML (até 800 caracteres antes)
+    const before = xmlContent.substring(Math.max(0, index - 800), index);
+
+    // Coleta todos os marcadores candidatos e escolhe o mais próximo do CDATA
+    var candidates = [];
+
+    // variableName="..."
+    var varRe = /variableName="([^"]+)"/g;
+    var vm;
+    while ((vm = varRe.exec(before)) !== null) {
+      candidates.push({ type: "variable", name: vm[1], pos: vm.index });
+    }
+
+    // <ee:set-payload
+    var spRe = /<ee:set-payload/g;
+    var sm;
+    while ((sm = spRe.exec(before)) !== null) {
+      candidates.push({ type: "set-payload", name: "set-payload", pos: sm.index });
+    }
+
+    // Ordena por posição decrescente (mais próximo do CDATA primeiro)
+    candidates.sort(function (a, b) { return b.pos - a.pos; });
+
+    var name = candidates.length > 0 ? candidates[0].name : null;
+
+    // Calcula número da linha no XML (1-indexed)
+    const xmlLine = xmlContent.substring(0, index).split("\n").length;
+
+    scripts.push({
+      code: "%dw 2.0" + dwBody,
+      name: name,
+      xmlLine: xmlLine,
+      xmlIndex: index,
+    });
+  }
+
+  return scripts;
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
   const opts = parseArgs(process.argv);
+
+  // ─── Mule-file mode ────────────────────────────────────────────────
+  if (opts.muleFile) {
+    // Lê o XML
+    let xmlContent;
+    try {
+      xmlContent = fs.readFileSync(opts.muleFile, "utf-8");
+    } catch (err) {
+      die(`Could not read XML file "${opts.muleFile}": ${err.message}`);
+    }
+
+    const scripts = extractDataWeaveFromXML(xmlContent);
+
+    if (scripts.length === 0) {
+      die(`No DataWeave scripts found in "${opts.muleFile}"`);
+    }
+
+    const quietMode = opts.jsonOutput || opts.silent;
+    if (!quietMode) {
+      console.log(`\n\x1b[1m── ${opts.muleFile}: ${scripts.length} DW scripts ──\x1b[0m\n`);
+    }
+
+    const results = [];
+    const hasResources = opts.resources && opts.resources.length > 0;
+
+    for (let si = 0; si < scripts.length; si++) {
+      const script = scripts[si];
+      let scriptContent = script.code;
+      const scriptLabel = script.name
+        ? `${opts.muleFile} → ${script.name}`
+        : `${opts.muleFile}:${si + 1}`;
+
+      // ── Resolve imports ──────────────────────────────────────────
+      let lineMap = null;
+      if (hasResources) {
+        const hasImports = scriptContent.split("\n").some(function (l) {
+          return parseImportLine(l) !== null;
+        });
+        if (hasImports) {
+          try {
+            const resolved = resolveImports(scriptContent, opts.resources, null, scriptLabel);
+            scriptContent = resolved.script;
+            lineMap = resolved.lineMap;
+          } catch (err) {
+            results.push({
+              index: si + 1,
+              name: script.name,
+              xmlLine: script.xmlLine,
+              status: "ERROR",
+              error: { kind: "ImportError", message: err.message }
+            });
+            if (!quietMode) {
+              const tag = script.name ? `var=${script.name}` : `script-${si + 1}`;
+              console.log(`  [\x1b[31mERROR\x1b[0m ] #${si + 1} ${tag} (line ${script.xmlLine})`);
+            }
+            continue;
+          }
+        }
+      }
+
+      // ── Call API ─────────────────────────────────────────────────
+      const body = buildRequestBody(scriptContent, opts.inputs, opts.inputPaths);
+      let response;
+      try {
+        response = await postJSON(`${API_ORIGIN}${API_PATH}`, body);
+      } catch (err) {
+        results.push({
+          index: si + 1,
+          name: script.name,
+          xmlLine: script.xmlLine,
+          status: "NETWORK_ERROR",
+          error: { message: err.message }
+        });
+        if (!quietMode) {
+          const tag = script.name ? `var=${script.name}` : `script-${si + 1}`;
+          console.log(`  [\x1b[33mNET\x1b[0m   ] #${si + 1} ${tag} (line ${script.xmlLine})`);
+        }
+        continue;
+      }
+
+      if (!response.data || typeof response.data !== "object") {
+        results.push({
+          index: si + 1,
+          name: script.name,
+          xmlLine: script.xmlLine,
+          status: "NETWORK_ERROR",
+          error: { message: `Unexpected API response (HTTP ${response.status})` }
+        });
+        if (!quietMode) {
+          const tag = script.name ? `var=${script.name}` : `script-${si + 1}`;
+          console.log(`  [\x1b[33mNET\x1b[0m   ] #${si + 1} ${tag} (line ${script.xmlLine})`);
+        }
+        continue;
+      }
+
+      const apiResult = response.data;
+
+      // ── Process result ────────────────────────────────────────────
+      if (apiResult.success) {
+        results.push({
+          index: si + 1,
+          name: script.name,
+          xmlLine: script.xmlLine,
+          status: "OK"
+        });
+        if (!quietMode) {
+          const tag = script.name ? `var=${script.name}` : `script-${si + 1}`;
+          console.log(`  [\x1b[32mOK\x1b[0m    ] #${si + 1} ${tag} (line ${script.xmlLine})`);
+        }
+      } else if (opts.syntaxOnly && isInputError(apiResult.error)) {
+        // --only-syntax está implícito em --mule-file: suprime erros de input
+        results.push({
+          index: si + 1,
+          name: script.name,
+          xmlLine: script.xmlLine,
+          status: "OK",
+          suppressed: true
+        });
+        if (!quietMode) {
+          const tag = script.name ? `var=${script.name}` : `script-${si + 1}`;
+          console.log(`  [\x1b[32mOK\x1b[0m    ] #${si + 1} ${tag} (line ${script.xmlLine}) \x1b[2m— input-only\x1b[0m`);
+        }
+      } else {
+        // Erro real
+        if (lineMap) adjustErrorLocation(apiResult.error, lineMap);
+        results.push({
+          index: si + 1,
+          name: script.name,
+          xmlLine: script.xmlLine,
+          status: "ERROR",
+          error: apiResult.error
+        });
+        if (!quietMode) {
+          const tag = script.name ? `var=${script.name}` : `script-${si + 1}`;
+          console.log(`  [\x1b[31mERROR\x1b[0m ] #${si + 1} ${tag} (line ${script.xmlLine})`);
+        }
+      }
+    }
+
+    // ── Summary ──────────────────────────────────────────────────────
+    const okCount = results.filter(function (r) { return r.status === "OK"; }).length;
+    const errorCount = results.filter(function (r) { return r.status === "ERROR"; }).length;
+    const netCount = results.filter(function (r) { return r.status === "NETWORK_ERROR"; }).length;
+
+    if (opts.jsonOutput) {
+      console.log(JSON.stringify({
+        muleFile: opts.muleFile,
+        totalScripts: scripts.length,
+        ok: okCount,
+        errors: errorCount,
+        networkErrors: netCount,
+        scripts: results,
+      }, null, 2));
+    } else if (!opts.silent) {
+      console.log(`\n\x1b[1m── Results ──\x1b[0m`);
+      console.log(`Total: ${scripts.length} | \x1b[32mOK: ${okCount}\x1b[0m | \x1b[31mERROR: ${errorCount}\x1b[0m${netCount > 0 ? " | \x1b[33mNET: " + netCount + "\x1b[0m" : ""}`);
+
+      if (errorCount > 0) {
+        console.log(`\n\x1b[1m\x1b[31mERRORS:\x1b[0m`);
+        for (var ri = 0; ri < results.length; ri++) {
+          var r = results[ri];
+          if (r.status === "ERROR") {
+            var tag = r.name ? `var=${r.name}` : "script";
+            console.log(`  \x1b[31m#${r.index} ${tag}\x1b[0m (line ${r.xmlLine}):`);
+            var msg = r.error.message || JSON.stringify(r.error);
+            console.log(`    [${r.error.kind || "error"}] ${msg.substring(0, 400)}`);
+            if (r.error.location && r.error.location.start) {
+              var src = r.error.location.sourceIdentifier || "main";
+              console.log(`    \x1b[2mat ${src} line ${r.error.location.start.line}:${r.error.location.start.column}\x1b[0m`);
+            }
+            console.log("");
+          }
+        }
+      }
+
+      if (netCount > 0) {
+        console.log(`\x1b[1m\x1b[33mNETWORK ERRORS:\x1b[0m`);
+        for (var nri = 0; nri < results.length; nri++) {
+          var nr = results[nri];
+          if (nr.status === "NETWORK_ERROR") {
+            var ntag = nr.name ? `var=${nr.name}` : "script";
+            console.log(`  \x1b[33m#${nr.index} ${ntag}\x1b[0m (line ${nr.xmlLine}): ${nr.error.message}`);
+          }
+        }
+      }
+    }
+
+    process.exit(errorCount > 0 || netCount > 0 ? 1 : 0);
+  }
+
+  // ─── Single-script mode ─────────────────────────────────────────────
 
   // Lê o script
   let scriptContent;

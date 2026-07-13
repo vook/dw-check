@@ -42,6 +42,9 @@ dw-check script.dwl --agent
 # Silencioso — só retorna exit code (0=ok, 1=erro, 2=falha)
 dw-check script.dwl --silent
 
+# Validar todos os scripts DW em um arquivo XML do Mule
+dw-check --mule-file wallet.xml --resources src/main/resources
+
 # Resolver imports de módulos customizados
 dw-check script.dwl --resources src/main/resources
 dw-check script.dwl -r src/main/resources -r src/test/resources
@@ -78,17 +81,7 @@ main (line: 4, column:10)
 
 ## Modo somente sintaxe (`--only-syntax`)
 
-A flag `--only-syntax` filtra **erros relacionados a inputs** da resposta da API, mostrando apenas erros de sintaxe e compilação. Útil para validar a estrutura do script sem precisar fornecer dados de entrada reais.
-
-**O que conta como erro de input:**
-- `Unable to resolve reference of: \`payload\`.` — script referencia `payload` mas nenhum input foi fornecido
-- `No variable named 'vars'.` — script referencia `vars` mas nenhum input foi fornecido
-- Erros de diretiva de input ausente
-
-**Comportamento:**
-- Se a API retornar **apenas** erros de input → tratado como sucesso (exit code 0), erros suprimidos
-- Se a API retornar erros de sintaxe/compilação → exibidos normalmente (exit code 1)
-- Se o script for válido → sucesso normalmente
+Ignora erros relacionados a inputs (payload/vars ausentes, etc.) e reporta apenas erros de sintaxe e compilação. Útil para validar a estrutura do script sem fornecer dados de entrada.
 
 ```bash
 # Script referencia payload — normalmente daria erro, suprimido com --only-syntax
@@ -108,16 +101,11 @@ dw-check script.dwl --only-syntax
 
 ## Rastreamento de erros em imports
 
-Quando um módulo importado contém um erro, o `dw-check` rastreia o erro de volta ao **arquivo fonte original e número da linha real** — não apenas a linha do import no script principal.
-
-**Como funciona:**
-1. Durante a resolução de imports, comentários de marcação `// @dw-import: <arquivo>` são inseridos no script gerado
-2. Cada linha injetada é rastreada com seu arquivo fonte e número de linha original
-3. Quando a API reporta um erro em uma linha injetada, a localização é ajustada para apontar para o fonte real
+Ao usar `--resources` para importar um arquivo `.dwl`, erros que ocorrerem no arquivo importado são reportados com o **arquivo e linha reais** de origem — não a linha do import no script principal.
 
 **Exemplo — erro em módulo importado:**
 
-Dado `main.dwl`:
+`main.dwl`:
 ```dataweave
 %dw 2.0
 output json
@@ -126,7 +114,7 @@ import formatName from modules::utils
 formatName(payload.name)
 ```
 
-E `modules/utils.dwl` (linha 5 tem erro de sintaxe):
+`modules/utils.dwl` (linha 5 tem erro de sintaxe):
 ```dataweave
 %dw 2.0
 import * from dw::core::Strings
@@ -143,9 +131,9 @@ Missing Object Field Expression. e.g {a: 123}
   em modules/utils.dwl line 5:12
 ```
 
-Em vez de reportar o erro na linha do import em `main.dwl`, aponta para `modules/utils.dwl` linha 5 — a localização real do bug.
+O erro aponta para `modules/utils.dwl` linha 5 — o arquivo e linha reais onde está o bug.
 
-**Saída JSON** inclui `sourceFile` na localização:
+**Saída JSON** inclui `sourceFile`:
 ```json
 {
   "success": false,
@@ -162,7 +150,59 @@ Em vez de reportar o erro na linha do import em `main.dwl`, aponta para `modules
 }
 ```
 
-**Imports aninhados** são rastreados por toda a cadeia de dependências. Se `A` importa de `B` que importa de `C`, um erro em `C` apontará corretamente para o arquivo e número de linha em `C`.
+**Imports aninhados** são rastreados por toda a cadeia. Se `A` importa de `B` que importa de `C`, um erro em `C` aponta corretamente para o arquivo e linha em `C`.
+
+## Modo arquivo Mule (`--mule-file`)
+
+Detecta todos os blocos de script DataWeave (`%dw 2.0` dentro de CDATA) em um arquivo de configuração XML do MuleSoft e valida cada um individualmente. Os blocos são validados **somente sintaxe** — erros de input como payload ausente são automaticamente ignorados.
+
+```bash
+# Validar todos os scripts DW em um XML do Mule
+dw-check --mule-file wallet.xml
+
+# Com resolução de módulos customizados
+dw-check --mule-file wallet.xml --resources src/main/resources
+
+# Saída JSON para CI/CD
+dw-check --mule-file wallet.xml --json
+```
+
+**Saída:**
+```
+── wallet.xml: 15 DW scripts ──
+
+  [OK    ] #1 var=formatName (line 45)
+  [OK    ] #2 var=validateInput (line 92)
+  [ERROR ] #3 var=transformResponse (line 134)
+  [OK    ] #4 set-payload (line 201)
+  ...
+
+── Results ──
+Total: 15 | OK: 13 | ERROR: 2
+
+ERRORS:
+  #3 var=transformResponse (line 134):
+    [CompilationException] Missing Object Field Expression.
+    at modules/utils.dwl line 5:12
+```
+
+**Saída JSON:**
+```json
+{
+  "muleFile": "wallet.xml",
+  "totalScripts": 15,
+  "ok": 13,
+  "errors": 2,
+  "networkErrors": 0,
+  "scripts": [
+    { "index": 1, "name": "formatName", "xmlLine": 45, "status": "OK" },
+    { "index": 3, "name": "transformResponse", "xmlLine": 134, "status": "ERROR",
+      "error": { "kind": "CompilationException", "message": "...", "location": {...} } }
+  ]
+}
+```
+
+Os nomes dos scripts são detectados pelo contexto XML: `<ee:set-variable variableName="X">` resulta em `X`, `<ee:set-payload>` resulta em `set-payload`.
 
 ## Modo agente (`--agent`)
 
@@ -246,7 +286,7 @@ Paths de módulo usam `::` como separador (convenção DataWeave), mapeados para
 
 A flag `--resources` pode ser usada múltiplas vezes. O primeiro diretório que contiver o arquivo `.dwl` solicitado vence.
 
-**Mapeamento de linhas:** quando a API reporta um erro, os números de linha são ajustados de volta para o script original (antes da injeção dos imports). Se o erro se origina de um módulo importado, o output mostra o caminho do arquivo do módulo e o número real da linha dentro daquele arquivo. Veja [Rastreamento de erros em imports](#rastreamento-de-erros-em-imports) para detalhes.
+**Mapeamento de linhas:** quando a API reporta um erro em um módulo importado, o output mostra o caminho do arquivo do módulo e a linha real — não a linha do import no script principal. Veja [Rastreamento de erros em imports](#rastreamento-de-erros-em-imports).
 
 ## `$` em strings
 

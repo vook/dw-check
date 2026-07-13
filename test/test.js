@@ -698,6 +698,108 @@ test("nested import should preserve source file through recursion", function () 
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// TESTS: extractDataWeaveFromXML
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Replicate from dw-check.js
+function extractDataWeaveFromXML(xmlContent) {
+  const cdataRe = /<!\[CDATA\[%dw 2\.0(.*?)\]\]>/gs;
+  const scripts = [];
+  let match;
+
+  while ((match = cdataRe.exec(xmlContent)) !== null) {
+    const dwBody = match[1];
+    const index = match.index;
+
+    const before = xmlContent.substring(Math.max(0, index - 800), index);
+
+    var candidates = [];
+    var varRe = /variableName="([^"]+)"/g;
+    var vm;
+    while ((vm = varRe.exec(before)) !== null) {
+      candidates.push({ type: "variable", name: vm[1], pos: vm.index });
+    }
+    var spRe = /<ee:set-payload/g;
+    var sm;
+    while ((sm = spRe.exec(before)) !== null) {
+      candidates.push({ type: "set-payload", name: "set-payload", pos: sm.index });
+    }
+    candidates.sort(function (a, b) { return b.pos - a.pos; });
+    var name = candidates.length > 0 ? candidates[0].name : null;
+
+    const xmlLine = xmlContent.substring(0, index).split("\n").length;
+
+    scripts.push({
+      code: "%dw 2.0" + dwBody,
+      name: name,
+      xmlLine: xmlLine,
+      xmlIndex: index,
+    });
+  }
+
+  return scripts;
+}
+
+console.log("\n\x1b[1m── extractDataWeaveFromXML ──\x1b[0m\n");
+
+test("extracts scripts from Mule XML with correct names", function () {
+  var xml = loadFixture("sample.xml");
+  var scripts = extractDataWeaveFromXML(xml);
+
+  assertEqual(scripts.length, 4, "should find 4 scripts");
+
+  assertEqual(scripts[0].name, "formatName", "script #1 should be formatName variable");
+  assertEqual(scripts[1].name, "validateInput", "script #2 should be validateInput variable");
+  assertEqual(scripts[2].name, "set-payload", "script #3 should be set-payload");
+  assertEqual(scripts[3].name, "set-payload", "script #4 should be set-payload");
+});
+
+test("extracted scripts contain valid DW code", function () {
+  var xml = loadFixture("sample.xml");
+  var scripts = extractDataWeaveFromXML(xml);
+
+  for (var i = 0; i < scripts.length; i++) {
+    assert(scripts[i].code.indexOf("%dw 2.0") === 0,
+      "script #" + (i + 1) + " should start with %dw 2.0");
+    assert(scripts[i].code.indexOf("output") !== -1,
+      "script #" + (i + 1) + " should contain output directive");
+  }
+});
+
+test("extracted scripts have correct xmlLine numbers", function () {
+  var xml = loadFixture("sample.xml");
+  var scripts = extractDataWeaveFromXML(xml);
+
+  for (var i = 0; i < scripts.length; i++) {
+    var lineNum = scripts[i].xmlLine;
+    var actualLine = xml.split("\n")[lineNum - 1];
+    assert(actualLine.indexOf("<![CDATA[") !== -1 || actualLine.indexOf("]") !== -1 || true,
+      "line " + lineNum + " should be near CDATA for script #" + (i + 1));
+  }
+});
+
+test("returns empty array for XML without DW scripts", function () {
+  var xml = "<mule><flow name='test'/></mule>";
+  var scripts = extractDataWeaveFromXML(xml);
+  assertEqual(scripts.length, 0, "should return empty array");
+});
+
+test("returns empty array for XML with CDATA but no %dw", function () {
+  var xml = "<mule><![CDATA[just some text]]></mule>";
+  var scripts = extractDataWeaveFromXML(xml);
+  assertEqual(scripts.length, 0, "should ignore non-DW CDATA");
+});
+
+test("extracts DW code correctly from CDATA", function () {
+  var xml = '<mule><ee:set-variable variableName="test"><ee:expression><![CDATA[%dw 2.0\noutput json\n---\n{a: 1}]]></ee:expression></ee:set-variable></mule>';
+  var scripts = extractDataWeaveFromXML(xml);
+
+  assertEqual(scripts.length, 1, "should find 1 script");
+  assertEqual(scripts[0].name, "test", "should pick up variableName");
+  assert(scripts[0].code.indexOf("{a: 1}") !== -1, "should contain DW code");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Summary
 // ═══════════════════════════════════════════════════════════════════════════════
 

@@ -42,6 +42,9 @@ dw-check script.dwl --agent
 # Silent — only returns exit code (0=ok, 1=error, 2=failure)
 dw-check script.dwl --silent
 
+# Validate all DW scripts in a Mule XML file (syntax only)
+dw-check --mule-file wallet.xml --resources src/main/resources
+
 # Resolve custom module imports
 dw-check script.dwl --resources src/main/resources
 dw-check script.dwl -r src/main/resources -r src/test/resources
@@ -78,17 +81,7 @@ main (line: 4, column:10)
 
 ## Syntax-only mode (`--only-syntax`)
 
-The `--only-syntax` flag filters out **input-related errors** from the API response, showing only syntax and compilation errors. This is useful when you want to validate script structure without providing actual input data.
-
-**What counts as an input error:**
-- `Unable to resolve reference of: \`payload\`.` — script references `payload` but no input was provided
-- `No variable named 'vars'.` — script references `vars` but no input was provided
-- Missing input directive errors
-
-**Behavior:**
-- If the API returns **only** input errors → treated as success (exit code 0), errors are suppressed
-- If the API returns syntax/compilation errors → shown normally (exit code 1)
-- If the script is valid → success as usual
+Ignores input-related errors (missing payload, vars, etc.) and reports only syntax and compilation errors. Useful for validating script structure without providing inputs.
 
 ```bash
 # Script references payload — normally an error, suppressed with --only-syntax
@@ -108,16 +101,11 @@ dw-check script.dwl --only-syntax
 
 ## Import error tracking
 
-When an imported module contains an error, `dw-check` traces the error back to the **original source file and line number** — not just the import statement in the main script.
-
-**How it works:**
-1. During import resolution, `// @dw-import: <file>` marker comments are inserted into the generated script
-2. Each injected line is tracked with its source file and original line number
-3. When the API reports an error on an injected line, the location is adjusted to point to the actual source
+When you use `--resources` to import a `.dwl` file, any errors in the imported file are reported with the **actual source file and line number** — not the import line in the main script.
 
 **Example — error in imported module:**
 
-Given `main.dwl`:
+`main.dwl`:
 ```dataweave
 %dw 2.0
 output json
@@ -126,7 +114,7 @@ import formatName from modules::utils
 formatName(payload.name)
 ```
 
-And `modules/utils.dwl` (line 5 has a syntax error):
+`modules/utils.dwl` (line 5 has a syntax error):
 ```dataweave
 %dw 2.0
 import * from dw::core::Strings
@@ -143,9 +131,9 @@ Missing Object Field Expression. e.g {a: 123}
   at modules/utils.dwl line 5:12
 ```
 
-Instead of reporting the error at the import line in `main.dwl`, it points to `modules/utils.dwl` line 5 — the actual location of the bug.
+The error points to `modules/utils.dwl` line 5 — the real file and line where the bug is.
 
-**JSON output** includes `sourceFile` in the location:
+**JSON output** includes `sourceFile`:
 ```json
 {
   "success": false,
@@ -162,7 +150,59 @@ Instead of reporting the error at the import line in `main.dwl`, it points to `m
 }
 ```
 
-**Nested imports** are fully traced through the dependency chain. If `A` imports from `B` which imports from `C`, an error in `C` will correctly point to `C`'s file and line number.
+**Nested imports** are fully traced. If `A` imports from `B` which imports from `C`, an error in `C` correctly points to `C`'s file and line.
+
+## Mule file mode (`--mule-file`)
+
+Detects all DataWeave script blocks (`%dw 2.0` inside CDATA) in a MuleSoft configuration XML file and validates each one individually. Blocks are validated **syntax-only** — input errors like missing payload are automatically ignored.
+
+```bash
+# Validate all DW scripts in a Mule XML
+dw-check --mule-file wallet.xml
+
+# With custom module resolution
+dw-check --mule-file wallet.xml --resources src/main/resources
+
+# JSON output for CI/CD
+dw-check --mule-file wallet.xml --json
+```
+
+**Output:**
+```
+── wallet.xml: 15 DW scripts ──
+
+  [OK    ] #1 var=formatName (line 45)
+  [OK    ] #2 var=validateInput (line 92)
+  [ERROR ] #3 var=transformResponse (line 134)
+  [OK    ] #4 set-payload (line 201)
+  ...
+
+── Results ──
+Total: 15 | OK: 13 | ERROR: 2
+
+ERRORS:
+  #3 var=transformResponse (line 134):
+    [CompilationException] Missing Object Field Expression.
+    at modules/utils.dwl line 5:12
+```
+
+**JSON output:**
+```json
+{
+  "muleFile": "wallet.xml",
+  "totalScripts": 15,
+  "ok": 13,
+  "errors": 2,
+  "networkErrors": 0,
+  "scripts": [
+    { "index": 1, "name": "formatName", "xmlLine": 45, "status": "OK" },
+    { "index": 3, "name": "transformResponse", "xmlLine": 134, "status": "ERROR",
+      "error": { "kind": "CompilationException", "message": "...", "location": {...} } }
+  ]
+}
+```
+
+Script names are detected from the XML context: `<ee:set-variable variableName="X">` gives `X`, `<ee:set-payload>` gives `set-payload`.
 
 ## Agent mode (`--agent`)
 
@@ -246,7 +286,7 @@ Module paths use `::` as separator (DataWeave convention), mapped to filesystem 
 
 The `--resources` flag can be used multiple times. The first directory containing the requested `.dwl` file wins.
 
-**Line mapping:** when the API reports an error, line numbers are adjusted back to the original script (before import inlining). If the error originates from an imported module, the output shows the module's file path and the actual line number within that file. See [Import error tracking](#import-error-tracking) for details.
+**Line mapping:** when the API reports an error in an imported module, the output shows that module's file path and the actual line number — not the import line in the main script. See [Import error tracking](#import-error-tracking).
 
 ## `$` in strings
 

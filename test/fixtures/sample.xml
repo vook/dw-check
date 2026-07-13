@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core">
+
+    <flow name="wallet-flow">
+        <ee:transform>
+            <ee:variables>
+                <ee:set-variable variableName="formatName">
+                    <ee:expression><![CDATA[%dw 2.0
+output json
+---
+{
+    name: upper(payload.name)
+}]]></ee:expression>
+                </ee:set-variable>
+                <ee:set-variable variableName="validateInput">
+                    <ee:expression><![CDATA[%dw 2.0
+output json
+---
+{
+    valid: payload.amount > 0
+}]]></ee:expression>
+                </ee:set-variable>
+            </ee:variables>
+            <ee:set-payload>
+                <![CDATA[%dw 2.0
+output json
+---
+{
+    result: payload
+}]]>
+            </ee:set-payload>
+        </ee:transform>
+    </flow>
+
+    <flow name="error-flow">
+        <ee:transform>
+            <ee:message>
+                <ee:set-payload>
+                    <![CDATA[%dw 2.0
+output json
+---
+{
+    error: payload.message default "unknown"
+}]]>
+                </ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+</mule>
