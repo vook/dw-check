@@ -6,7 +6,7 @@
  * Usage:
  *   node dw-check.js <script.dwl> [--input name=file.json ...]
  *   node dw-check.js --inline "%dw 2.0 ..." [--input name=file.json ...]
- *   node dw-check.js <script.dwl> --syntax-only
+ *   node dw-check.js <script.dwl> --only-syntax
  *   node dw-check.js <script.dwl> --json
  *
  * Examples:
@@ -107,8 +107,10 @@ function resolveModuleFile(modulePath, resourcesDirs) {
  * - wildcard: extrai todas as funções encontradas
  * - functionNames explícito: extrai só as listadas; die() se faltar alguma
  *
- * Retorna um Map onde cada chave é o nome da função e o valor é o código
- * fonte completo da função.
+ * Retorna { functions: Map<name, code>, ranges: Map<name, {start, end}> }
+ * onde start/end são números de linha 1-indexed (inclusive) no conteúdo
+ * original (dwlContent) — usados para rastrear a origem de cada linha
+ * após injeção de imports.
  */
 function extractFunctions(dwlContent, functionNames, wildcard, fileLabel) {
   var lines = dwlContent.split("\n");
@@ -124,11 +126,12 @@ function extractFunctions(dwlContent, functionNames, wildcard, fileLabel) {
   }
 
   if (funStarts.length === 0) {
-    if (wildcard) return new Map();
+    if (wildcard) return { functions: new Map(), ranges: new Map() };
     die("no functions found in " + fileLabel);
   }
 
   var functions = new Map();
+  var ranges = new Map(); // name → { start: 1-indexed, end: 1-indexed }
 
   for (var j = 0; j < funStarts.length; j++) {
     var start = funStarts[j];
@@ -137,20 +140,27 @@ function extractFunctions(dwlContent, functionNames, wildcard, fileLabel) {
     // Pula funções não solicitadas (modo nomeado)
     if (!wildcard && functionNames.indexOf(start.name) === -1) continue;
 
-    // Extrai linhas [start.line, end)
-    var funLines = lines.slice(start.line, end);
+    // Track original range antes do trim (0-indexed)
+    var origStart = start.line;
+    var origEnd = end; // exclusive
+
+    // Extrai linhas [origStart, origEnd)
+    var funLines = lines.slice(origStart, origEnd);
 
     // Remove linhas vazias do final
     while (funLines.length > 0 && funLines[funLines.length - 1].trim() === "") {
       funLines.pop();
+      origEnd--;
     }
 
     // Remove linhas vazias do início da função (entre funções)
     while (funLines.length > 0 && funLines[0].trim() === "") {
       funLines.shift();
+      origStart++;
     }
 
     functions.set(start.name, funLines.join("\n"));
+    ranges.set(start.name, { start: origStart + 1, end: origEnd }); // 1-indexed inclusive
   }
 
   // Verifica funções faltantes no modo nomeado
@@ -163,7 +173,7 @@ function extractFunctions(dwlContent, functionNames, wildcard, fileLabel) {
     }
   }
 
-  return functions;
+  return { functions: functions, ranges: ranges };
 }
 
 // ─── Import resolution orchestrator ──────────────────────────────────────────
@@ -177,18 +187,19 @@ function extractFunctions(dwlContent, functionNames, wildcard, fileLabel) {
  * 3. Resolve recursivamente imports dentro do arquivo importado
  * 4. Extrai as funções solicitadas do arquivo resolvido
  * 5. Substitui a linha de import pelo código fonte das funções
- * 6. Constrói lineMap para ajuste de números de linha em erros
+ * 6. Adiciona comentário de marcação // @dw-import: <file>
+ * 7. Constrói lineMap para rastrear arquivo e linha de origem de cada linha
  *
  * Retorna { script, lineMap } onde:
  *   - script: conteúdo modificado (pronto para enviar à API)
- *   - lineMap: array onde lineMap[modifiedLineIdx] = originalLineNumber
- *     (linhas injetadas apontam para o número da linha do import original)
+ *   - lineMap: array onde lineMap[modifiedLineIdx] = { file, line }
+ *     com file = caminho do arquivo fonte e line = número da linha (1-indexed)
  */
-function resolveImports(scriptContent, resourcesDirs, visited) {
+function resolveImports(scriptContent, resourcesDirs, visited, sourceFile) {
   if (!visited) visited = new Set();
 
   var lines = scriptContent.split("\n");
-  var importMap = new Map(); // lineIndex → { functionCode }
+  var importMap = new Map(); // lineIndex → { blockLines: [{code, sourceFile, sourceLine}] }
 
   // Coleta imports dw:: do script atual para evitar duplicação na re-emissão
   var mainDwImports = [];
@@ -234,25 +245,25 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
     // Resolve recursivamente os imports do arquivo dependente
     var visitedCopy = new Set(visited);
     visitedCopy.add(moduleFile);
-    var resolved = resolveImports(dwlContent, resourcesDirs, visitedCopy);
+    var resolved = resolveImports(dwlContent, resourcesDirs, visitedCopy, moduleFile);
 
-    // Coleta imports dw:: do módulo resolvido para re-emitir
-    var dwImports = [];
+    // Coleta imports dw:: do módulo resolvido para re-emitir (com tracking de linha)
+    var dwImportEntries = []; // [{code, sourceLine}] — sourceLine é 1-indexed em resolved.script
     var resolvedLines = resolved.script.split("\n");
     for (var ri = 0; ri < resolvedLines.length; ri++) {
       var rl = resolvedLines[ri].trim();
       if (/^import\s+.*\s+from\s+dw::/.test(rl)) {
-        if (dwImports.indexOf(rl) === -1 && mainDwImports.indexOf(rl) === -1) {
-          dwImports.push(rl);
+        var alreadyInMain = mainDwImports.indexOf(rl) !== -1;
+        var alreadyCollected = dwImportEntries.some(function (e) { return e.code === rl; });
+        if (!alreadyInMain && !alreadyCollected) {
+          dwImportEntries.push({ code: rl, sourceLine: ri + 1 }); // 1-indexed
         }
       }
     }
 
     // Extrai TODAS as funções do módulo resolvido (não só as solicitadas),
     // pois dependências transitivas já foram inlineadas em resolved.script.
-    // Ex: se A importa f de B e B importa g de C, o script resolvido de B
-    // já contém g inlineado; precisamos extrair ambas.
-    var functions = extractFunctions(
+    var extractResult = extractFunctions(
       resolved.script,
       [],
       true,
@@ -262,43 +273,68 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
     // Valida que as funções explicitamente solicitadas existem
     if (!parsed.wildcard) {
       for (var k = 0; k < parsed.functions.length; k++) {
-        if (!functions.has(parsed.functions[k])) {
+        if (!extractResult.functions.has(parsed.functions[k])) {
           die("function '" + parsed.functions[k] + "' not found in " + moduleFile);
         }
       }
     }
 
-    // Concatena o código das funções extraídas (com imports dw:: preservados)
-    var funCodeParts = [];
-    for (var di = 0; di < dwImports.length; di++) {
-      funCodeParts.push(dwImports[di]);
+    // Constrói blockLines: array de {code, sourceFile, sourceLine} para cada linha injetada
+    var blockLines = [];
+
+    // 1. Linhas de dw:: import do módulo
+    for (var di = 0; di < dwImportEntries.length; di++) {
+      var entry = dwImportEntries[di];
+      var dwSrc = resolved.lineMap[entry.sourceLine - 1];
+      blockLines.push({
+        code: entry.code,
+        sourceFile: dwSrc ? dwSrc.file : moduleFile,
+        sourceLine: dwSrc ? dwSrc.line : entry.sourceLine
+      });
     }
-    functions.forEach(function (code) {
-      funCodeParts.push(code);
+
+    // 2. Comentário de marcação — aponta para a linha do import no arquivo pai
+    var markerComment = "// @dw-import: " + moduleFile;
+    blockLines.push({
+      code: markerComment,
+      sourceFile: sourceFile || "<main>",
+      sourceLine: i + 1 // linha do import no script atual (1-indexed)
     });
 
-    importMap.set(i, funCodeParts.join("\n"));
+    // 3. Código das funções extraídas — cada linha rastreia sua origem via resolved.lineMap
+    extractResult.functions.forEach(function (code, name) {
+      var range = extractResult.ranges.get(name);
+      var funCodeLines = code.split("\n");
+      for (var fl = 0; fl < funCodeLines.length; fl++) {
+        var resolvedLineNum = range.start + fl; // 1-indexed em resolved.script
+        var src = resolved.lineMap[resolvedLineNum - 1];
+        blockLines.push({
+          code: funCodeLines[fl],
+          sourceFile: src ? src.file : moduleFile,
+          sourceLine: src ? src.line : resolvedLineNum
+        });
+      }
+    });
+
+    importMap.set(i, blockLines);
   }
 
   // Segunda passagem: constrói o script modificado e o lineMap
   var modifiedLines = [];
-  var lineMap = []; // 0-indexed: modifiedLineIndex → originalLineNumber (1-indexed)
+  var lineMap = []; // 0-indexed: modifiedLineIndex → { file, line }
 
   for (var i = 0; i < lines.length; i++) {
-    var replacement = importMap.get(i);
+    var blockLines = importMap.get(i);
 
-    if (replacement !== undefined) {
-      var importLineNumber = i + 1; // 1-indexed
-      var codeLines = replacement.split("\n");
-
-      // Adiciona linhas de código injetado
-      for (var c = 0; c < codeLines.length; c++) {
-        modifiedLines.push(codeLines[c]);
-        lineMap.push(importLineNumber); // injetado → aponta para linha do import
+    if (blockLines !== undefined) {
+      for (var c = 0; c < blockLines.length; c++) {
+        var bl = blockLines[c];
+        modifiedLines.push(bl.code);
+        lineMap.push({ file: bl.sourceFile, line: bl.sourceLine });
       }
     } else {
       modifiedLines.push(lines[i]);
-      lineMap.push(i + 1); // não-injetado → mapeia para si mesmo
+      lineMap.push({ file: sourceFile || "<main>", line: i + 1 });
     }
   }
 
@@ -308,11 +344,12 @@ function resolveImports(scriptContent, resourcesDirs, visited) {
 // ─── Error location adjustment ──────────────────────────────────────────────
 
 /**
- * Ajusta os números de linha em um erro da API do DataWeave Playground
- * para refletir o script original (antes da injeção de imports).
+ * Ajusta os números de linha e source identifier em um erro da API do
+ * DataWeave Playground para refletir o script original (antes da injeção
+ * de imports).
  *
  * Usa o lineMap produzido por resolveImports:
- *   lineMap[modifiedLineIndex] = originalLineNumber
+ *   lineMap[modifiedLineIndex] = { file, line }
  *
  * O objeto error é modificado in-place.
  */
@@ -320,13 +357,18 @@ function adjustErrorLocation(error, lineMap) {
   if (!error || !error.location || !error.location.start) return error;
 
   var modifiedLine = error.location.start.line;
-  var originalLine = lineMap[modifiedLine - 1]; // 0-indexed lookup
+  var mapping = lineMap[modifiedLine - 1]; // 0-indexed lookup
 
-  if (originalLine != null) {
-    error.location.start.line = originalLine;
+  if (mapping != null) {
+    error.location.start.line = mapping.line;
+    // Atualiza o source identifier para o arquivo real de origem
+    if (mapping.file && mapping.file !== "<main>") {
+      error.location.sourceIdentifier = mapping.file;
+    }
     if (error.location.end && error.location.end.line) {
       var endModified = error.location.end.line;
-      error.location.end.line = lineMap[endModified - 1] || originalLine;
+      var endMapping = lineMap[endModified - 1];
+      error.location.end.line = endMapping ? endMapping.line : mapping.line;
     }
   }
 
@@ -436,7 +478,7 @@ function parseArgs(argv) {
       continue;
     }
 
-    if (arg === "--syntax-only" || arg === "-s") {
+    if (arg === "--only-syntax" || arg === "-s") {
       result.syntaxOnly = true;
       i++;
       continue;
@@ -500,7 +542,8 @@ function printHelp() {
   --input, -in <name=file>      Add an input (payload, vars, etc.)
                                  Can be used multiple times.
                                  Ex: --input payload=data.json
-  --syntax-only, -s             Syntax check only (no type validation)
+  --only-syntax, -s              Only check syntax (ignore input-related errors
+                                 like missing payload/vars)
   --output, -o                  Show transformation output on success
   --json, -j                    JSON output (ideal for CI/CD)
   --silent, -q                  No stdout on success (status code only)
@@ -515,7 +558,7 @@ function printHelp() {
   dw-check script.dwl
   dw-check script.dwl --input payload=data.json
   dw-check script.dwl --input payload=data.json --input vars=ctx.json
-  dw-check --inline "%dw 2.0\\noutput json\\n---\\npayload" --syntax-only
+  dw-check --inline "%dw 2.0\\noutput json\\n---\\npayload" --only-syntax
   dw-check script.dwl --json
   dw-check script.dwl --resources src/main/resources
 `);
@@ -572,7 +615,34 @@ function buildRequestBody(scriptContent, inputs, inputPaths) {
   };
 }
 
-// ─── Formatação de erros ──────────────────────────────────────────────────────
+// ─── Error classification ──────────────────────────────────────────────────
+
+/**
+ * Classifica se um erro da API do DataWeave é relacionado a inputs
+ * (payload, vars, attributes não fornecidos).
+ *
+ * Erros de input não são erros de sintaxe — indicam apenas que o script
+ * referencia variáveis de entrada que não foram fornecidas.
+ */
+function isInputError(error) {
+  if (!error || !error.message) return false;
+
+  var msg = error.message.toLowerCase();
+
+  // Padrões que indicam erro de input (não de sintaxe)
+  var inputPatterns = [
+    /unable to resolve reference/,
+    /no variable named/,
+    /cannot find.*input/i,
+    /missing.*input/i,
+  ];
+
+  for (var p = 0; p < inputPatterns.length; p++) {
+    if (inputPatterns[p].test(msg)) return true;
+  }
+
+  return false;
+}
 
 function formatError(error, scriptLines) {
   const lines = [];
@@ -618,6 +688,7 @@ function formatErrorJSON(error) {
       location: error.location
         ? {
             source: error.location.sourceIdentifier || "main",
+            sourceFile: error.location.sourceFile || error.location.sourceIdentifier || null,
             line: error.location.start?.line,
             column: error.location.start?.column,
             endLine: error.location.end?.line,
@@ -724,6 +795,7 @@ function formatAgentOutput(result, scriptContent, scriptLabel, opts) {
         location: err.location
           ? {
               source: err.location.sourceIdentifier || "main",
+              sourceFile: err.location.sourceFile || err.location.sourceIdentifier || null,
               start: {
                 line: err.location.start?.line,
                 column: err.location.start?.column,
@@ -824,16 +896,11 @@ async function main() {
       if (!opts.jsonOutput && !opts.silent && !opts.agentMode) {
         dim("resolving imports...");
       }
-      var resolved = resolveImports(scriptContent, opts.resources);
+      var resolved = resolveImports(scriptContent, opts.resources, null, scriptLabel);
       scriptContent = resolved.script;
       lineMap = resolved.lineMap;
     }
   }
-
-  // Validação syntax-only: usa a API também, mas podemos adicionar header
-  const actionHeader = opts.syntaxOnly
-    ? { "X-DataweaveAction": "weaveType" }
-    : { "X-DataweaveAction": "preview" };
 
   const body = buildRequestBody(scriptContent, opts.inputs, opts.inputPaths);
 
@@ -852,7 +919,7 @@ async function main() {
 
   let response;
   try {
-    response = await postJSON(`${API_ORIGIN}${API_PATH}`, body, actionHeader);
+    response = await postJSON(`${API_ORIGIN}${API_PATH}`, body);
   } catch (err) {
     if (opts.agentMode) {
       console.log(JSON.stringify({
@@ -917,7 +984,36 @@ async function main() {
     }
     process.exit(0);
   } else {
-    // Erro
+    // Erro — filtra erros de input se --only-syntax
+    if (opts.syntaxOnly && isInputError(result.error)) {
+      // Erro é relacionado a input (payload/vars ausente) — suprime
+      if (opts.agentMode) {
+        console.log(JSON.stringify({
+          status: "ok",
+          script: {
+            name: scriptLabel,
+            lines: (scriptContent.match(/\n/g) || []).length + 1,
+            hasInputs: Object.keys(opts.inputs).length > 0,
+            inputNames: Object.keys(opts.inputs),
+            syntaxOnly: true,
+            inputErrorsSuppressed: 1,
+          },
+          result: null,
+        }, null, 2));
+      } else if (opts.jsonOutput) {
+        console.log(JSON.stringify({
+          success: true,
+          output: null,
+          contentType: null,
+          logs: [],
+          inputErrorsSuppressed: 1,
+        }, null, 2));
+      } else if (!opts.silent) {
+        console.log(`\x1b[32m✔ Script valid\x1b[0m (${scriptLabel}) \x1b[2m— input errors suppressed\x1b[0m`);
+      }
+      process.exit(0);
+    }
+
     if (opts.agentMode) {
       var agentOutput = formatAgentOutput(result, scriptContent, scriptLabel, opts);
       // Ajusta linhas de erro para script original (após context extraction)

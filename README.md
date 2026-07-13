@@ -27,8 +27,8 @@ dw-check --inline "%dw 2.0\noutput json\n---\n{message: \"hello\"}"
 dw-check script.dwl --input payload=input.json
 dw-check script.dwl --input payload=data.json --input vars=context.json
 
-# Syntax check only
-dw-check script.dwl --syntax-only
+# Syntax check only (ignores input-related errors like missing payload)
+dw-check script.dwl --only-syntax
 
 # Show output on success
 dw-check script.dwl --input payload=input.json --output
@@ -75,6 +75,94 @@ main (line: 4, column:10)
 
   in main line 4:10
 ```
+
+## Syntax-only mode (`--only-syntax`)
+
+The `--only-syntax` flag filters out **input-related errors** from the API response, showing only syntax and compilation errors. This is useful when you want to validate script structure without providing actual input data.
+
+**What counts as an input error:**
+- `Unable to resolve reference of: \`payload\`.` — script references `payload` but no input was provided
+- `No variable named 'vars'.` — script references `vars` but no input was provided
+- Missing input directive errors
+
+**Behavior:**
+- If the API returns **only** input errors → treated as success (exit code 0), errors are suppressed
+- If the API returns syntax/compilation errors → shown normally (exit code 1)
+- If the script is valid → success as usual
+
+```bash
+# Script references payload — normally an error, suppressed with --only-syntax
+dw-check script.dwl --only-syntax
+# ✔ Script valid (script.dwl) — input errors suppressed
+
+# Script has a real syntax error — still shown
+dw-check script.dwl --only-syntax
+# ✘ CompilationException
+# Missing Object Field Expression. e.g {a: 123}
+```
+
+**JSON output** includes `inputErrorsSuppressed` count:
+```json
+{ "success": true, "output": null, "inputErrorsSuppressed": 1 }
+```
+
+## Import error tracking
+
+When an imported module contains an error, `dw-check` traces the error back to the **original source file and line number** — not just the import statement in the main script.
+
+**How it works:**
+1. During import resolution, `// @dw-import: <file>` marker comments are inserted into the generated script
+2. Each injected line is tracked with its source file and original line number
+3. When the API reports an error on an injected line, the location is adjusted to point to the actual source
+
+**Example — error in imported module:**
+
+Given `main.dwl`:
+```dataweave
+%dw 2.0
+output json
+import formatName from modules::utils
+---
+formatName(payload.name)
+```
+
+And `modules/utils.dwl` (line 5 has a syntax error):
+```dataweave
+%dw 2.0
+import * from dw::core::Strings
+
+fun formatName(name) =
+    {name: }  // ← missing value after colon at line 5
+```
+
+Output:
+```
+✘ CompilationException
+Missing Object Field Expression. e.g {a: 123}
+
+  at modules/utils.dwl line 5:12
+```
+
+Instead of reporting the error at the import line in `main.dwl`, it points to `modules/utils.dwl` line 5 — the actual location of the bug.
+
+**JSON output** includes `sourceFile` in the location:
+```json
+{
+  "success": false,
+  "error": {
+    "kind": "CompilationException",
+    "message": "Missing Object Field Expression.",
+    "location": {
+      "source": "modules/utils.dwl",
+      "sourceFile": "modules/utils.dwl",
+      "line": 5,
+      "column": 12
+    }
+  }
+}
+```
+
+**Nested imports** are fully traced through the dependency chain. If `A` imports from `B` which imports from `C`, an error in `C` will correctly point to `C`'s file and line number.
 
 ## Agent mode (`--agent`)
 
@@ -158,7 +246,7 @@ Module paths use `::` as separator (DataWeave convention), mapped to filesystem 
 
 The `--resources` flag can be used multiple times. The first directory containing the requested `.dwl` file wins.
 
-**Line mapping:** when the API reports an error, line numbers are adjusted back to the original script (before import inlining), so error locations match your source files.
+**Line mapping:** when the API reports an error, line numbers are adjusted back to the original script (before import inlining). If the error originates from an imported module, the output shows the module's file path and the actual line number within that file. See [Import error tracking](#import-error-tracking) for details.
 
 ## `$` in strings
 

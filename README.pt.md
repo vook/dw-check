@@ -27,8 +27,8 @@ dw-check --inline "%dw 2.0\noutput json\n---\n{message: \"hello\"}"
 dw-check script.dwl --input payload=entrada.json
 dw-check script.dwl --input payload=dados.json --input vars=contexto.json
 
-# Checagem de sintaxe apenas
-dw-check script.dwl --syntax-only
+# Checagem de sintaxe apenas (ignora erros de input)
+dw-check script.dwl --only-syntax
 
 # Mostrar output em caso de sucesso
 dw-check script.dwl --input payload=entrada.json --output
@@ -75,6 +75,94 @@ main (line: 4, column:10)
 
   em main line 4:10
 ```
+
+## Modo somente sintaxe (`--only-syntax`)
+
+A flag `--only-syntax` filtra **erros relacionados a inputs** da resposta da API, mostrando apenas erros de sintaxe e compilação. Útil para validar a estrutura do script sem precisar fornecer dados de entrada reais.
+
+**O que conta como erro de input:**
+- `Unable to resolve reference of: \`payload\`.` — script referencia `payload` mas nenhum input foi fornecido
+- `No variable named 'vars'.` — script referencia `vars` mas nenhum input foi fornecido
+- Erros de diretiva de input ausente
+
+**Comportamento:**
+- Se a API retornar **apenas** erros de input → tratado como sucesso (exit code 0), erros suprimidos
+- Se a API retornar erros de sintaxe/compilação → exibidos normalmente (exit code 1)
+- Se o script for válido → sucesso normalmente
+
+```bash
+# Script referencia payload — normalmente daria erro, suprimido com --only-syntax
+dw-check script.dwl --only-syntax
+# ✔ Script valid (script.dwl) — input errors suppressed
+
+# Script com erro de sintaxe real — ainda é exibido
+dw-check script.dwl --only-syntax
+# ✘ CompilationException
+# Missing Object Field Expression. e.g {a: 123}
+```
+
+**Saída JSON** inclui contagem `inputErrorsSuppressed`:
+```json
+{ "success": true, "output": null, "inputErrorsSuppressed": 1 }
+```
+
+## Rastreamento de erros em imports
+
+Quando um módulo importado contém um erro, o `dw-check` rastreia o erro de volta ao **arquivo fonte original e número da linha real** — não apenas a linha do import no script principal.
+
+**Como funciona:**
+1. Durante a resolução de imports, comentários de marcação `// @dw-import: <arquivo>` são inseridos no script gerado
+2. Cada linha injetada é rastreada com seu arquivo fonte e número de linha original
+3. Quando a API reporta um erro em uma linha injetada, a localização é ajustada para apontar para o fonte real
+
+**Exemplo — erro em módulo importado:**
+
+Dado `main.dwl`:
+```dataweave
+%dw 2.0
+output json
+import formatName from modules::utils
+---
+formatName(payload.name)
+```
+
+E `modules/utils.dwl` (linha 5 tem erro de sintaxe):
+```dataweave
+%dw 2.0
+import * from dw::core::Strings
+
+fun formatName(name) =
+    {name: }  // ← valor ausente após ":" na linha 5
+```
+
+Saída:
+```
+✘ CompilationException
+Missing Object Field Expression. e.g {a: 123}
+
+  em modules/utils.dwl line 5:12
+```
+
+Em vez de reportar o erro na linha do import em `main.dwl`, aponta para `modules/utils.dwl` linha 5 — a localização real do bug.
+
+**Saída JSON** inclui `sourceFile` na localização:
+```json
+{
+  "success": false,
+  "error": {
+    "kind": "CompilationException",
+    "message": "Missing Object Field Expression.",
+    "location": {
+      "source": "modules/utils.dwl",
+      "sourceFile": "modules/utils.dwl",
+      "line": 5,
+      "column": 12
+    }
+  }
+}
+```
+
+**Imports aninhados** são rastreados por toda a cadeia de dependências. Se `A` importa de `B` que importa de `C`, um erro em `C` apontará corretamente para o arquivo e número de linha em `C`.
 
 ## Modo agente (`--agent`)
 
@@ -158,7 +246,7 @@ Paths de módulo usam `::` como separador (convenção DataWeave), mapeados para
 
 A flag `--resources` pode ser usada múltiplas vezes. O primeiro diretório que contiver o arquivo `.dwl` solicitado vence.
 
-**Mapeamento de linhas:** quando a API reporta um erro, os números de linha são ajustados de volta para o script original (antes da injeção dos imports), para que a localização do erro corresponda aos seus arquivos fonte.
+**Mapeamento de linhas:** quando a API reporta um erro, os números de linha são ajustados de volta para o script original (antes da injeção dos imports). Se o erro se origina de um módulo importado, o output mostra o caminho do arquivo do módulo e o número real da linha dentro daquele arquivo. Veja [Rastreamento de erros em imports](#rastreamento-de-erros-em-imports) para detalhes.
 
 ## `$` em strings
 
